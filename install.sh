@@ -6,7 +6,7 @@
 # Simple installer: Maps your controller, then builds GRUB module
 #
 
-VERSION="1.0"
+VERSION="1.1"
 
 set -euo pipefail
 
@@ -132,6 +132,8 @@ echo ""
 sleep 1
 
 # Simple inline Python mapper - runs directly (not captured)
+MAPPER_EXIT=0
+set +e  # Disable errexit so we can capture Python's exit code
 python3 << 'PYEOF'
 import sys, time
 import usb.core, usb.util
@@ -249,6 +251,7 @@ else:
 PYEOF
 
 MAPPER_EXIT=$?
+set -e  # Re-enable errexit
 
 if [ $MAPPER_EXIT -ne 0 ]; then
     err "Controller mapping failed!"
@@ -307,7 +310,7 @@ ok "Bootstrap done"
 
 # Configure
 info "Configuring..."
-CONF_OPTS="--with-platform=${GRUB_PLATFORM##*-} --disable-werror"
+CONF_OPTS="--with-platform=${GRUB_PLATFORM##*-} --disable-werror --enable-usb"
 [ "$GRUB_PLATFORM" = "x86_64-efi" ] && CONF_OPTS="$CONF_OPTS --target=x86_64"
 
 if ! ./configure $CONF_OPTS > ../configure.log 2>&1; then
