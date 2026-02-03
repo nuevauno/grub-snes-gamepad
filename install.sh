@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# GRUB SNES Gamepad Installer v0.4
+# GRUB SNES Gamepad Installer v0.5
 # https://github.com/nuevauno/grub-snes-gamepad
 #
 
@@ -16,11 +16,40 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
+# Spinner function - runs in background
+spinner_pid=""
+
+start_spinner() {
+    local msg="$1"
+    (
+        chars='|/-\'
+        while true; do
+            for (( i=0; i<${#chars}; i++ )); do
+                printf "\r  [%s] %s" "${chars:$i:1}" "$msg"
+                sleep 0.2
+            done
+        done
+    ) &
+    spinner_pid=$!
+}
+
+stop_spinner() {
+    if [ -n "$spinner_pid" ]; then
+        kill "$spinner_pid" 2>/dev/null || true
+        wait "$spinner_pid" 2>/dev/null || true
+        spinner_pid=""
+        printf "\r                                                              \r"
+    fi
+}
+
+# Cleanup spinner on exit
+trap stop_spinner EXIT
+
 print_header() {
     clear
     echo ""
     echo -e "${CYAN}${BOLD}=======================================================${NC}"
-    echo -e "${CYAN}${BOLD}       GRUB SNES Gamepad Installer v0.4                ${NC}"
+    echo -e "${CYAN}${BOLD}       GRUB SNES Gamepad Installer v0.5                ${NC}"
     echo -e "${CYAN}${BOLD}       Control your bootloader with a game controller  ${NC}"
     echo -e "${CYAN}${BOLD}=======================================================${NC}"
     echo ""
@@ -36,6 +65,22 @@ ok() { echo -e "  ${GREEN}[OK]${NC} $1"; }
 err() { echo -e "  ${RED}[ERROR]${NC} $1"; }
 info() { echo -e "  ${CYAN}[INFO]${NC} $1"; }
 warn() { echo -e "  ${YELLOW}[WARN]${NC} $1"; }
+
+# Run command with spinner
+run_with_spinner() {
+    local msg="$1"
+    local logfile="$2"
+    shift 2
+
+    start_spinner "$msg"
+    if "$@" > "$logfile" 2>&1; then
+        stop_spinner
+        return 0
+    else
+        stop_spinner
+        return 1
+    fi
+}
 
 # Check root
 if [ "$EUID" -ne 0 ]; then
@@ -92,19 +137,26 @@ print_step 2 6 "Installing dependencies"
 
 case "$DISTRO" in
     ubuntu|debian|linuxmint|pop)
-        info "Installing packages with apt (this may take a minute)..."
-        apt-get update -qq
-        apt-get install -y -qq git build-essential autoconf automake gettext bison flex python3 python3-pip libusb-1.0-0-dev pkg-config
+        start_spinner "Updating package lists..."
+        apt-get update -qq 2>/dev/null
+        stop_spinner
+        ok "Package lists updated"
+
+        start_spinner "Installing build tools (this takes ~1 min)..."
+        apt-get install -y -qq git build-essential autoconf automake gettext bison flex python3 python3-pip libusb-1.0-0-dev pkg-config 2>/dev/null
+        stop_spinner
         ok "APT packages installed"
         ;;
     fedora)
-        info "Installing packages with dnf..."
-        dnf install -y -q git gcc make autoconf automake gettext bison flex python3 python3-pip libusb1-devel
+        start_spinner "Installing packages with dnf..."
+        dnf install -y -q git gcc make autoconf automake gettext bison flex python3 python3-pip libusb1-devel 2>/dev/null
+        stop_spinner
         ok "DNF packages installed"
         ;;
     arch|manjaro)
-        info "Installing packages with pacman..."
-        pacman -Sy --noconfirm git base-devel autoconf automake gettext bison flex python python-pip libusb
+        start_spinner "Installing packages with pacman..."
+        pacman -Sy --noconfirm git base-devel autoconf automake gettext bison flex python python-pip libusb 2>/dev/null
+        stop_spinner
         ok "Pacman packages installed"
         ;;
     *)
@@ -383,43 +435,78 @@ cd "$BUILD_DIR" || { err "Cannot create build directory"; exit 1; }
 
 # Clone GRUB with gamepad support
 echo ""
-info "Cloning GRUB source (this takes a minute)..."
-if git clone --depth 1 -b grub-gamepad https://github.com/tsoding/grub.git grub 2>&1 | tail -5; then
+start_spinner "Downloading GRUB source (30-60 seconds)..."
+if git clone --depth 1 -b grub-gamepad https://github.com/tsoding/grub.git grub > clone.log 2>&1; then
+    stop_spinner
     ok "GRUB source downloaded"
 else
+    stop_spinner
     err "Failed to clone GRUB. Check your internet connection."
+    cat clone.log | tail -10
     exit 1
 fi
 
 cd grub || { err "Cannot enter grub directory"; exit 1; }
 
 # Bootstrap
-info "Running bootstrap (please wait)..."
+start_spinner "Running bootstrap (1-2 minutes)..."
 if ./bootstrap > ../bootstrap.log 2>&1; then
+    stop_spinner
     ok "Bootstrap complete"
 else
+    stop_spinner
     err "Bootstrap failed. Check $BUILD_DIR/bootstrap.log"
     cat ../bootstrap.log | tail -20
     exit 1
 fi
 
 # Configure
-info "Configuring GRUB (this takes a few minutes)..."
+start_spinner "Configuring GRUB (2-3 minutes)..."
 if ./configure --with-platform="$GRUB_PLATFORM" > ../configure.log 2>&1; then
+    stop_spinner
     ok "Configure complete"
 else
+    stop_spinner
     err "Configure failed. Check $BUILD_DIR/configure.log"
     cat ../configure.log | tail -20
     exit 1
 fi
 
-# Build
-info "Compiling GRUB (this is the slow part, please wait)..."
+# Build - this is the long one, show progress
+info "Compiling GRUB (3-5 minutes)..."
 echo ""
 CORES=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)
+
+# Show a progress indicator during make
+(
+    count=0
+    while true; do
+        count=$((count + 1))
+        bar=""
+        pct=$((count % 100))
+        filled=$((pct / 5))
+        for i in $(seq 1 20); do
+            if [ $i -le $filled ]; then
+                bar="${bar}#"
+            else
+                bar="${bar}-"
+            fi
+        done
+        printf "\r  [%s] Compiling... (%d files processed)" "$bar" "$count"
+        sleep 0.5
+    done
+) &
+PROGRESS_PID=$!
+
 if make -j"$CORES" > ../make.log 2>&1; then
+    kill $PROGRESS_PID 2>/dev/null || true
+    wait $PROGRESS_PID 2>/dev/null || true
+    printf "\r                                                                    \r"
     ok "Compilation complete"
 else
+    kill $PROGRESS_PID 2>/dev/null || true
+    wait $PROGRESS_PID 2>/dev/null || true
+    printf "\r                                                                    \r"
     err "Compilation failed. Check $BUILD_DIR/make.log"
     cat ../make.log | tail -30
     exit 1
@@ -465,17 +552,21 @@ else
 fi
 
 # Update GRUB
-info "Updating GRUB..."
+start_spinner "Updating GRUB configuration..."
 if command -v update-grub > /dev/null 2>&1; then
-    update-grub 2>/dev/null || true
+    update-grub > /dev/null 2>&1 || true
+    stop_spinner
     ok "GRUB updated with update-grub"
 elif command -v grub2-mkconfig > /dev/null 2>&1; then
-    grub2-mkconfig -o /boot/grub2/grub.cfg 2>/dev/null || true
+    grub2-mkconfig -o /boot/grub2/grub.cfg > /dev/null 2>&1 || true
+    stop_spinner
     ok "GRUB updated with grub2-mkconfig"
 elif command -v grub-mkconfig > /dev/null 2>&1; then
-    grub-mkconfig -o "$GRUB_DIR/grub.cfg" 2>/dev/null || true
+    grub-mkconfig -o "$GRUB_DIR/grub.cfg" > /dev/null 2>&1 || true
+    stop_spinner
     ok "GRUB updated with grub-mkconfig"
 else
+    stop_spinner
     warn "Could not find grub update command. Please run update-grub manually."
 fi
 
