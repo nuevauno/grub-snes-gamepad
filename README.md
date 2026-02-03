@@ -39,12 +39,17 @@ This project creates a GRUB module (`usb_snes_gamepad.mod`) that:
 grub-snes-gamepad/
 ├── src/
 │   └── usb_snes_gamepad.c    # GRUB module source
+├── tools/
+│   └── snes-mapper.py        # Interactive controller mapper
+├── configs/                   # Generated controller configs
 ├── docs/
 │   ├── hid-reports.md        # HID report format documentation
 │   └── research.md           # Research notes
 ├── scripts/
 │   ├── build.sh              # Build script
-│   └── detect-controller.sh  # Detect your controller's USB IDs
+│   ├── detect-controller.sh  # Detect controller USB IDs
+│   ├── capture-hid.sh        # Capture raw HID reports
+│   └── test-qemu.sh          # Test in QEMU
 ├── iso/boot/grub/
 │   └── grub.cfg              # Test GRUB configuration
 └── README.md
@@ -52,7 +57,28 @@ grub-snes-gamepad/
 
 ## Quick Start
 
-### 1. Find Your Controller's USB IDs
+### Option A: Interactive Mapper (Recommended)
+
+The easiest way to configure your controller:
+
+```bash
+# Install dependency
+sudo apt install python3-pip
+pip3 install pyusb
+
+# Run the interactive mapper
+sudo python3 tools/snes-mapper.py
+```
+
+The tool will:
+1. Detect your controller automatically
+2. Guide you to press each button
+3. Generate configuration files
+4. Show you exactly what to do next
+
+### Option B: Manual Setup
+
+#### 1. Find Your Controller's USB IDs
 
 ```bash
 # Connect your SNES controller and run:
@@ -63,13 +89,13 @@ lsusb | grep -i game
 # Example output: Bus 001 Device 005: ID 0810:e501 Personal Communication Systems, Inc.
 ```
 
-### 2. Build the Module
+#### 2. Build the Module
 
 ```bash
 ./scripts/build.sh
 ```
 
-### 3. Install
+#### 3. Install
 
 ```bash
 sudo cp usb_snes_gamepad.mod /boot/grub/x86_64-efi/

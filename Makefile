@@ -1,4 +1,4 @@
-.PHONY: all build test clean help
+.PHONY: all build test clean help mapper
 
 all: build
 
@@ -11,6 +11,11 @@ test:
 detect:
 	@./scripts/detect-controller.sh
 
+mapper:
+	@echo "Starting interactive controller mapper..."
+	@echo "This requires root access for USB reading."
+	@sudo python3 tools/snes-mapper.py
+
 capture:
 	@echo "Usage: make capture DEVICE=0810:e501"
 	@if [ -n "$(DEVICE)" ]; then ./scripts/capture-hid.sh $(DEVICE); fi
@@ -22,6 +27,7 @@ clean:
 help:
 	@echo "GRUB SNES Gamepad - Available targets:"
 	@echo ""
+	@echo "  make mapper   - Interactive controller mapping (recommended)"
 	@echo "  make build    - Build the GRUB module and test ISO"
 	@echo "  make test     - Test in QEMU with USB passthrough"
 	@echo "  make detect   - Detect connected USB controllers"
