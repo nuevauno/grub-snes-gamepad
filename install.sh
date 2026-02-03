@@ -1,10 +1,16 @@
 #!/bin/bash
 #
-# GRUB SNES Gamepad Installer v0.5
+# GRUB SNES Gamepad Installer v0.6
 # https://github.com/nuevauno/grub-snes-gamepad
+#
+# Builds and installs a custom GRUB module for USB gamepad support
+# Based on https://github.com/tsoding/grub (grub-gamepad branch)
 #
 
 set -e
+
+# Trap errors for better debugging
+trap 'echo "Error at line $LINENO. Exit code: $?" >&2' ERR
 
 # Colors
 RED='\033[0;31m'
@@ -49,7 +55,7 @@ print_header() {
     clear
     echo ""
     echo -e "${CYAN}${BOLD}=======================================================${NC}"
-    echo -e "${CYAN}${BOLD}       GRUB SNES Gamepad Installer v0.5                ${NC}"
+    echo -e "${CYAN}${BOLD}       GRUB SNES Gamepad Installer v0.6                ${NC}"
     echo -e "${CYAN}${BOLD}       Control your bootloader with a game controller  ${NC}"
     echo -e "${CYAN}${BOLD}=======================================================${NC}"
     echo ""
@@ -142,20 +148,33 @@ case "$DISTRO" in
         stop_spinner
         ok "Package lists updated"
 
-        start_spinner "Installing build tools (this takes ~1 min)..."
-        apt-get install -y -qq git build-essential autoconf automake autopoint gettext bison flex python3 python3-pip libusb-1.0-0-dev pkg-config fonts-unifont libfreetype-dev 2>/dev/null
-        stop_spinner
+        # Full list of packages required for GRUB compilation from git source
+        # See: https://www.gnu.org/software/grub/manual/grub/html_node/Obtaining-and-Building-GRUB.html
+        GRUB_BUILD_DEPS="git build-essential autoconf automake autopoint autogen gettext bison flex"
+        GRUB_BUILD_DEPS="$GRUB_BUILD_DEPS python3 python3-pip python-is-python3"
+        GRUB_BUILD_DEPS="$GRUB_BUILD_DEPS libusb-1.0-0-dev pkg-config fonts-unifont libfreetype-dev"
+        GRUB_BUILD_DEPS="$GRUB_BUILD_DEPS help2man texinfo liblzma-dev libopts25 libopts25-dev"
+        GRUB_BUILD_DEPS="$GRUB_BUILD_DEPS libdevmapper-dev libfuse-dev xorriso"
+
+        start_spinner "Installing build tools (this takes ~2 min)..."
+        if ! apt-get install -y -qq $GRUB_BUILD_DEPS 2>/dev/null; then
+            stop_spinner
+            warn "Some optional packages failed, trying essential packages only..."
+            start_spinner "Installing essential packages..."
+            apt-get install -y -qq git build-essential autoconf automake autopoint gettext bison flex python3 python3-pip libusb-1.0-0-dev pkg-config fonts-unifont help2man texinfo 2>/dev/null || true
+            stop_spinner
+        fi
         ok "APT packages installed"
         ;;
     fedora)
         start_spinner "Installing packages with dnf..."
-        dnf install -y -q git gcc make autoconf automake gettext bison flex python3 python3-pip libusb1-devel 2>/dev/null
+        dnf install -y -q git gcc make autoconf automake autogen gettext bison flex python3 python3-pip libusb1-devel texinfo help2man xz-devel device-mapper-devel 2>/dev/null
         stop_spinner
         ok "DNF packages installed"
         ;;
     arch|manjaro)
         start_spinner "Installing packages with pacman..."
-        pacman -Sy --noconfirm git base-devel autoconf automake gettext bison flex python python-pip libusb 2>/dev/null
+        pacman -Sy --noconfirm git base-devel autoconf automake autogen gettext bison flex python python-pip libusb texinfo help2man xz device-mapper 2>/dev/null
         stop_spinner
         ok "Pacman packages installed"
         ;;
@@ -434,9 +453,10 @@ mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR" || { err "Cannot create build directory"; exit 1; }
 
 # Clone GRUB with gamepad support
+# Note: We need full clone (not shallow) because bootstrap checks git history
 echo ""
-start_spinner "Downloading GRUB source (30-60 seconds)..."
-if git clone --depth 1 -b grub-gamepad https://github.com/tsoding/grub.git grub > clone.log 2>&1; then
+start_spinner "Downloading GRUB source (this may take 1-2 minutes)..."
+if git clone -b grub-gamepad https://github.com/tsoding/grub.git grub > clone.log 2>&1; then
     stop_spinner
     ok "GRUB source downloaded"
 else
@@ -448,27 +468,171 @@ fi
 
 cd grub || { err "Cannot enter grub directory"; exit 1; }
 
-# Bootstrap
-start_spinner "Running bootstrap (1-2 minutes)..."
+# Set PYTHON env var to ensure python3 is used (autogen.sh defaults to 'python')
+export PYTHON=python3
+
+# Bootstrap - this downloads gnulib and generates Makefile.util.am
+# This step can take 2-5 minutes as it clones gnulib from git.sv.gnu.org
+info "Running bootstrap (downloads gnulib, may take 3-5 minutes)..."
+info "This step clones gnulib from git.sv.gnu.org and generates build files"
+echo ""
+
+# Run bootstrap with verbose output to a log, show progress to user
+(
+    count=0
+    while true; do
+        count=$((count + 1))
+        dots=""
+        for i in $(seq 1 $((count % 4))); do
+            dots="${dots}."
+        done
+        printf "\r  [*] Bootstrap in progress%-4s (elapsed: %ds)" "$dots" "$count"
+        sleep 1
+    done
+) &
+BOOTSTRAP_PROGRESS_PID=$!
+
 if ./bootstrap > ../bootstrap.log 2>&1; then
-    stop_spinner
+    kill $BOOTSTRAP_PROGRESS_PID 2>/dev/null || true
+    wait $BOOTSTRAP_PROGRESS_PID 2>/dev/null || true
+    printf "\r                                                              \r"
     ok "Bootstrap complete"
 else
-    stop_spinner
-    err "Bootstrap failed. Check $BUILD_DIR/bootstrap.log"
-    cat ../bootstrap.log | tail -20
+    kill $BOOTSTRAP_PROGRESS_PID 2>/dev/null || true
+    wait $BOOTSTRAP_PROGRESS_PID 2>/dev/null || true
+    printf "\r                                                              \r"
+
+    # Check for common errors
+    if grep -q "gnulib" ../bootstrap.log 2>/dev/null; then
+        err "Bootstrap failed during gnulib download"
+        warn "This is often a network issue. Gnulib is downloaded from git.sv.gnu.org"
+        echo ""
+        info "Trying alternative approach: manual gnulib clone..."
+
+        # Try cloning gnulib manually
+        if [ ! -d "gnulib" ]; then
+            start_spinner "Cloning gnulib manually (this takes 2-3 minutes)..."
+            if git clone --depth 1 https://git.savannah.gnu.org/git/gnulib.git gnulib > ../gnulib-clone.log 2>&1; then
+                stop_spinner
+                ok "Gnulib cloned successfully"
+
+                # Retry bootstrap with local gnulib
+                info "Retrying bootstrap with local gnulib..."
+                if ./bootstrap --gnulib-srcdir=gnulib > ../bootstrap2.log 2>&1; then
+                    ok "Bootstrap complete (with manual gnulib)"
+                else
+                    err "Bootstrap still failed. See $BUILD_DIR/bootstrap2.log"
+                    cat ../bootstrap2.log | tail -20
+                    exit 1
+                fi
+            else
+                stop_spinner
+                err "Failed to clone gnulib manually"
+                cat ../gnulib-clone.log | tail -10
+                exit 1
+            fi
+        fi
+    elif grep -q "Makefile.util.am" ../bootstrap.log 2>/dev/null; then
+        err "Bootstrap failed: Makefile.util.am not generated"
+        warn "This usually means autogen.sh failed. Checking Python..."
+
+        # Check if python works
+        if ! command -v python3 > /dev/null 2>&1; then
+            err "Python3 not found! Please install python3."
+            exit 1
+        fi
+
+        # Try running autogen.sh directly
+        info "Trying to run autogen.sh directly..."
+        if [ -f "grub-core/lib/gnulib/stdlib.in.h" ]; then
+            if ./autogen.sh > ../autogen.log 2>&1; then
+                ok "autogen.sh completed"
+            else
+                err "autogen.sh failed. See $BUILD_DIR/autogen.log"
+                cat ../autogen.log | tail -20
+                exit 1
+            fi
+        else
+            err "Gnulib not properly bootstrapped"
+            echo ""
+            cat ../bootstrap.log | tail -30
+            exit 1
+        fi
+    else
+        err "Bootstrap failed. Check $BUILD_DIR/bootstrap.log"
+        echo ""
+        echo "Last 30 lines of bootstrap.log:"
+        cat ../bootstrap.log | tail -30
+        exit 1
+    fi
+fi
+
+# Verify that Makefile.util.am was generated
+if [ ! -f "Makefile.util.am" ]; then
+    err "Makefile.util.am was not generated!"
+    warn "This file should be created by autogen.sh/gentpl.py"
+
+    # Try running autogen.sh if gnulib exists
+    if [ -f "grub-core/lib/gnulib/stdlib.in.h" ]; then
+        info "Gnulib exists, trying to run autogen.sh..."
+        if FROM_BOOTSTRAP=1 ./autogen.sh > ../autogen-retry.log 2>&1; then
+            ok "autogen.sh succeeded"
+        else
+            err "autogen.sh failed"
+            cat ../autogen-retry.log | tail -20
+            exit 1
+        fi
+    else
+        err "Gnulib not found. Bootstrap did not complete properly."
+        exit 1
+    fi
+fi
+
+# Double-check the file exists now
+if [ ! -f "Makefile.util.am" ]; then
+    err "Makefile.util.am still not found after all attempts!"
+    err "Cannot continue without this file."
     exit 1
 fi
 
+ok "Build system files generated successfully"
+
 # Configure
-start_spinner "Configuring GRUB (2-3 minutes)..."
-if ./configure --with-platform="$GRUB_PLATFORM" > ../configure.log 2>&1; then
+info "Configuring GRUB for $GRUB_PLATFORM (2-3 minutes)..."
+echo ""
+
+# Determine configure options based on platform
+CONFIGURE_OPTS="--with-platform=${GRUB_PLATFORM##*-}"
+if [ "$GRUB_PLATFORM" = "x86_64-efi" ]; then
+    CONFIGURE_OPTS="$CONFIGURE_OPTS --target=x86_64"
+elif [ "$GRUB_PLATFORM" = "i386-pc" ]; then
+    CONFIGURE_OPTS="$CONFIGURE_OPTS --target=i386"
+fi
+
+# Disable some features we don't need to speed up compilation
+CONFIGURE_OPTS="$CONFIGURE_OPTS --disable-werror"
+
+start_spinner "Running configure..."
+if ./configure $CONFIGURE_OPTS > ../configure.log 2>&1; then
     stop_spinner
     ok "Configure complete"
 else
     stop_spinner
-    err "Configure failed. Check $BUILD_DIR/configure.log"
-    cat ../configure.log | tail -20
+
+    # Check for common configure errors
+    if grep -q "cannot run C compiled programs" ../configure.log 2>/dev/null; then
+        err "Configure failed: Cannot run compiled programs"
+        warn "This might be a cross-compilation issue or missing libc"
+    elif grep -q "C compiler cannot create executables" ../configure.log 2>/dev/null; then
+        err "Configure failed: C compiler not working"
+        warn "Please ensure gcc/build-essential is properly installed"
+    else
+        err "Configure failed. Check $BUILD_DIR/configure.log"
+    fi
+
+    echo ""
+    echo "Last 30 lines of configure.log:"
+    cat ../configure.log | tail -30
     exit 1
 fi
 
