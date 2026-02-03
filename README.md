@@ -10,8 +10,21 @@ When you have a dual-boot system (e.g., Windows/Ubuntu) with Bluetooth keyboard/
 
 Use a cheap USB SNES controller to navigate GRUB menu:
 - **D-pad Up/Down** → Navigate menu entries
-- **A/B Button** → Select/Enter
-- **Start** → Boot selected entry
+- **A or Start** → Select/Boot
+- **B** → Back/Cancel
+- **L/R** → Page Up/Down
+
+## One-Line Install
+
+```bash
+curl -sSL https://raw.githubusercontent.com/nuevauno/grub-snes-gamepad/main/install.sh | sudo bash
+```
+
+Or download and run manually:
+```bash
+wget https://github.com/nuevauno/grub-snes-gamepad/releases/latest/download/install.sh
+sudo bash install.sh
+```
 
 ## Status
 
