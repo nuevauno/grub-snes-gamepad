@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# GRUB Boot Selector
+# Gamepad Boot Selector
 #
 # Selector de SO que corre DESPUÉS de GRUB, dentro de Linux.
 # Se inyecta como ExecStartPre del display manager.
@@ -9,8 +9,6 @@
 #
 
 set -e
-
-VERSION="2026.02.04"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -21,9 +19,8 @@ NC='\033[0m'
 
 echo ""
 echo -e "${CYAN}${BOLD}╔════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}${BOLD}║        GRUB Boot Selector              ║${NC}"
+echo -e "${CYAN}${BOLD}║      Gamepad Boot Selector             ║${NC}"
 echo -e "${CYAN}${BOLD}╚════════════════════════════════════════╝${NC}"
-echo -e "${CYAN}${BOLD}           Version ${VERSION}                   ${NC}"
 echo ""
 
 if [ "$EUID" -ne 0 ]; then
@@ -33,11 +30,6 @@ fi
 
 if [ ! -f /etc/os-release ]; then
     echo -e "${RED}Error: Sistema no soportado${NC}"
-    exit 1
-fi
-
-if ! command -v systemctl >/dev/null 2>&1; then
-    echo -e "${RED}Error: systemd no disponible (systemctl).${NC}"
     exit 1
 fi
 
@@ -58,50 +50,21 @@ fi
 # ── Paso 1: Dependencias ──────────────────────────────────────────
 
 echo -e "${GREEN}[1/5]${NC} Instalando dependencias..."
+apt-get update -qq
+apt-get install -y -qq python3 python3-evdev joystick kbd 2>/dev/null
 
-install_deps() {
-    if command -v apt-get >/dev/null 2>&1; then
-        echo -e "  ${CYAN}→${NC} Usando apt-get"
-        apt-get update -qq || true
-        apt-get install -y -qq python3 python3-evdev joystick kbd 2>/dev/null || true
-    elif command -v dnf >/dev/null 2>&1; then
-        echo -e "  ${CYAN}→${NC} Usando dnf"
-        dnf -y install python3 python3-evdev joystick kbd 2>/dev/null || true
-    elif command -v pacman >/dev/null 2>&1; then
-        echo -e "  ${CYAN}→${NC} Usando pacman"
-        pacman -Sy --noconfirm python python-evdev joystick kbd 2>/dev/null || true
-    elif command -v zypper >/dev/null 2>&1; then
-        echo -e "  ${CYAN}→${NC} Usando zypper"
-        zypper --non-interactive install python3 python3-evdev joystick kbd 2>/dev/null || true
-    else
-        echo -e "${RED}Error: No se encontró un gestor de paquetes soportado.${NC}"
-        return 1
-    fi
+if ! python3 -c "import evdev" 2>/dev/null; then
+    echo -e "${YELLOW}python3-evdev no disponible via apt, intentando pip...${NC}"
+    apt-get install -y -qq python3-pip 2>/dev/null || true
+    pip3 install evdev 2>/dev/null || pip install evdev 2>/dev/null || true
+fi
 
-    if ! python3 -c "import evdev" 2>/dev/null; then
-        echo -e "${YELLOW}python3-evdev no disponible via paquetes, intentando pip...${NC}"
-        if command -v apt-get >/dev/null 2>&1; then
-            apt-get install -y -qq python3-pip 2>/dev/null || true
-        elif command -v dnf >/dev/null 2>&1; then
-            dnf -y install python3-pip 2>/dev/null || true
-        elif command -v pacman >/dev/null 2>&1; then
-            pacman -Sy --noconfirm python-pip 2>/dev/null || true
-        elif command -v zypper >/dev/null 2>&1; then
-            zypper --non-interactive install python3-pip 2>/dev/null || true
-        fi
-        pip3 install evdev 2>/dev/null || pip install evdev 2>/dev/null || true
-    fi
+if ! python3 -c "import evdev" 2>/dev/null; then
+    echo -e "${RED}Error: No se pudo instalar python3-evdev${NC}"
+    exit 1
+fi
 
-    if ! python3 -c "import evdev" 2>/dev/null; then
-        echo -e "${RED}Error: No se pudo instalar python3-evdev${NC}"
-        return 1
-    fi
-
-    echo -e "  ${GREEN}✓${NC} python3-evdev instalado"
-    return 0
-}
-
-install_deps
+echo -e "  ${GREEN}✓${NC} python3-evdev instalado"
 
 # ── Paso 2: Detectar display manager ─────────────────────────────
 
