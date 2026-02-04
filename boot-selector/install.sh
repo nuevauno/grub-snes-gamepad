@@ -1,14 +1,15 @@
 #!/bin/bash
 #
-# Gamepad Boot Selector
+# GRUB Boot Selector
 #
-# Selector de SO que corre DESPUÉS de GRUB, dentro de Linux.
-# Se inyecta como ExecStartPre del display manager.
-# Desactiva Plymouth (boot splash) para tomar control de la pantalla.
-# Usa Python + evdev para leer gamepad USB.
+# Selector de SO que corre DESPUES de GRUB, antes del login.
+# Se ejecuta como ExecStartPre del display manager.
 #
 
-set -e
+set -Eeuo pipefail
+
+VERSION="2026.02.04"
+INSTALL_LOG="/var/log/boot-selector-install.log"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -17,58 +18,104 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-echo ""
-echo -e "${CYAN}${BOLD}╔════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}${BOLD}║      Gamepad Boot Selector             ║${NC}"
-echo -e "${CYAN}${BOLD}╚════════════════════════════════════════╝${NC}"
-echo ""
+exec > >(tee -a "$INSTALL_LOG") 2>&1
+trap 'echo -e "${RED}Error en linea ${LINENO}. Revisa ${INSTALL_LOG}${NC}"' ERR
+
+header() {
+    echo ""
+    echo -e "${CYAN}${BOLD}╔════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}${BOLD}║        GRUB Boot Selector              ║${NC}"
+    echo -e "${CYAN}${BOLD}╚════════════════════════════════════════╝${NC}"
+    echo -e "${CYAN}${BOLD}           Version ${VERSION}                   ${NC}"
+    echo ""
+}
+
+step() {
+    echo -e "${GREEN}[$1]${NC} $2"
+}
+
+err() { echo -e "${RED}Error:${NC} $1"; }
+warn() { echo -e "${YELLOW}Aviso:${NC} $1"; }
+
+header
 
 if [ "$EUID" -ne 0 ]; then
-    echo -e "${RED}Error: Ejecutar como root (sudo)${NC}"
+    err "Ejecutar como root (sudo)"
+    exit 1
+fi
+
+if ! command -v systemctl >/dev/null 2>&1; then
+    err "systemd no disponible (systemctl)."
     exit 1
 fi
 
 if [ ! -f /etc/os-release ]; then
-    echo -e "${RED}Error: Sistema no soportado${NC}"
+    err "Sistema no soportado"
     exit 1
 fi
 
-# ── Limpiar versiones anteriores ──────────────────────────────────
+# Paso 0: limpiar versiones anteriores
+step "0/5" "Limpiando versiones anteriores..."
 
-echo -e "${GREEN}[0/5]${NC} Limpiando versiones anteriores..."
 systemctl disable boot-selector.service 2>/dev/null || true
 rm -f /etc/systemd/system/boot-selector.service
 rm -rf /etc/systemd/system/display-manager.service.d/wait-boot-selector.conf
 rm -f /run/boot-selector-done
-# Limpiar drop-ins anteriores de cualquier DM
-OLD_DM=$(cat /opt/boot-selector/.dm-service 2>/dev/null)
-if [ -n "$OLD_DM" ]; then
-    rm -f "/etc/systemd/system/${OLD_DM}.d/boot-selector.conf"
+
+OLD_DM=$(cat /opt/boot-selector/.dm-service 2>/dev/null || true)
+if [ -n "${OLD_DM}" ]; then
+    rm -f "/etc/systemd/system/${OLD_DM}.d/boot-selector.conf" || true
     rmdir "/etc/systemd/system/${OLD_DM}.d" 2>/dev/null || true
 fi
 
-# ── Paso 1: Dependencias ──────────────────────────────────────────
+rm -rf /opt/boot-selector
 
-echo -e "${GREEN}[1/5]${NC} Instalando dependencias..."
-apt-get update -qq
-apt-get install -y -qq python3 python3-evdev joystick kbd 2>/dev/null
+# Paso 1: dependencias
+step "1/5" "Instalando dependencias..."
 
-if ! python3 -c "import evdev" 2>/dev/null; then
-    echo -e "${YELLOW}python3-evdev no disponible via apt, intentando pip...${NC}"
-    apt-get install -y -qq python3-pip 2>/dev/null || true
-    pip3 install evdev 2>/dev/null || pip install evdev 2>/dev/null || true
-fi
+install_deps() {
+    if command -v apt-get >/dev/null 2>&1; then
+        echo -e "  ${CYAN}→${NC} Usando apt-get"
+        apt-get update -qq || true
+        apt-get install -y -qq python3 python3-evdev joystick kbd
+    elif command -v dnf >/dev/null 2>&1; then
+        echo -e "  ${CYAN}→${NC} Usando dnf"
+        dnf -y install python3 python3-evdev joystick kbd
+    elif command -v pacman >/dev/null 2>&1; then
+        echo -e "  ${CYAN}→${NC} Usando pacman"
+        pacman -Sy --noconfirm python python-evdev joystick kbd
+    elif command -v zypper >/dev/null 2>&1; then
+        echo -e "  ${CYAN}→${NC} Usando zypper"
+        zypper --non-interactive install python3 python3-evdev joystick kbd
+    else
+        err "No se encontro un gestor de paquetes soportado."
+        exit 1
+    fi
 
-if ! python3 -c "import evdev" 2>/dev/null; then
-    echo -e "${RED}Error: No se pudo instalar python3-evdev${NC}"
-    exit 1
-fi
+    if ! python3 -c "import evdev" >/dev/null 2>&1; then
+        warn "python3-evdev no disponible via paquetes, intentando pip..."
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get install -y -qq python3-pip || true
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf -y install python3-pip || true
+        elif command -v pacman >/dev/null 2>&1; then
+            pacman -Sy --noconfirm python-pip || true
+        elif command -v zypper >/dev/null 2>&1; then
+            zypper --non-interactive install python3-pip || true
+        fi
+        pip3 install evdev || pip install evdev || true
+    fi
 
-echo -e "  ${GREEN}✓${NC} python3-evdev instalado"
+    if ! python3 -c "import evdev" >/dev/null 2>&1; then
+        err "No se pudo instalar python3-evdev"
+        exit 1
+    fi
+}
 
-# ── Paso 2: Detectar display manager ─────────────────────────────
+install_deps
 
-echo -e "${GREEN}[2/5]${NC} Detectando display manager..."
+# Paso 2: detectar display manager
+step "2/5" "Detectando display manager..."
 
 DM_SERVICE=""
 
@@ -86,22 +133,23 @@ if [ -z "$DM_SERVICE" ]; then
 fi
 
 if [ -z "$DM_SERVICE" ]; then
-    echo -e "${RED}Error: No se detectó display manager${NC}"
+    err "No se detecto display manager"
     exit 1
 fi
 
 echo -e "  ${GREEN}✓${NC} Display manager: ${BOLD}${DM_SERVICE}${NC}"
 
-# ── Paso 3: Crear scripts ────────────────────────────────────────
-
-echo -e "${GREEN}[3/5]${NC} Creando selector..."
+# Paso 3: crear scripts
+step "3/5" "Creando selector..."
 
 mkdir -p /opt/boot-selector
+
 echo "$DM_SERVICE" > /opt/boot-selector/.dm-service
 
-# ── run.sh: wrapper que desactiva Plymouth y muestra el selector ──
 cat > /opt/boot-selector/run.sh << 'RUNEOF'
 #!/bin/bash
+set +e
+
 LOGFILE="/var/log/boot-selector.log"
 FLAG="/run/boot-selector-done"
 
@@ -115,29 +163,26 @@ if [ -f "$FLAG" ]; then
     exit 0
 fi
 
-# Esperar a que los dispositivos USB se enumeren
+# Esperar USB
 log "Waiting 2s for USB..."
 sleep 2
 
-# CRITICO: Plymouth (boot splash) controla el framebuffer durante el boot.
-# Hay que PARARLO completamente (quit, no solo deactivate).
+# Detener Plymouth si existe
 if command -v plymouth &>/dev/null; then
     log "Stopping Plymouth..."
-    plymouth quit 2>/dev/null && log "Plymouth quit OK" || log "Plymouth quit failed (may not be running)"
+    plymouth quit 2>/dev/null && log "Plymouth quit OK" || log "Plymouth quit failed"
     sleep 0.5
 else
     log "Plymouth not found (skipping)"
 fi
 
-# CRITICO: Aunque Plymouth pare, el VT queda en modo KD_GRAPHICS.
-# En ese modo el texto se escribe al buffer pero NO se renderiza en pantalla.
-# Hay que forzar KD_TEXT (0x00) via ioctl KDSETMODE (0x4B3A).
+# Forzar modo texto en tty1
 log "Forcing tty1 to text mode (KD_TEXT)..."
 /usr/bin/python3 -c "
 import fcntl, os
 fd = os.open('/dev/tty1', os.O_WRONLY)
 try:
-    fcntl.ioctl(fd, 0x4B3A, 0)  # KDSETMODE=0x4B3A, KD_TEXT=0x00
+    fcntl.ioctl(fd, 0x4B3A, 0)
 finally:
     os.close(fd)
 " 2>/dev/null && log "tty1 KD_TEXT OK" || log "tty1 KD_TEXT failed"
@@ -150,14 +195,14 @@ sleep 0.3
 # Limpiar pantalla
 printf '\033[2J\033[H' > /dev/tty1 2>/dev/null
 
-# Ejecutar selector directamente en tty1
+# Ejecutar selector
 log "Starting selector.py on tty1..."
 /usr/bin/python3 /opt/boot-selector/selector.py < /dev/tty1 > /dev/tty1 2>> "$LOGFILE"
 RESULT=$?
 log "selector.py exited with code $RESULT"
 
 # Marcar como ejecutado
-touch "$FLAG"
+: > "$FLAG"
 log "Flag created"
 
 log "run.sh finished"
@@ -165,7 +210,6 @@ exit 0
 RUNEOF
 chmod +x /opt/boot-selector/run.sh
 
-# ── selector.py: menú con gamepad real ──
 cat > /opt/boot-selector/selector.py << 'PYEOF'
 #!/usr/bin/env python3
 """
@@ -182,7 +226,7 @@ import subprocess
 import re
 import shutil
 
-# ── Logging ──
+# --- Logging ---
 
 logging.basicConfig(
     filename="/var/log/boot-selector.log",
@@ -192,7 +236,7 @@ logging.basicConfig(
 log = logging.getLogger("boot-selector")
 log.info("selector.py started (PID=%d)", os.getpid())
 
-# ── Config ──
+# --- Config ---
 
 TIMEOUT = 15
 DEFAULT_SEL = 0
@@ -201,7 +245,7 @@ APP_VERSION = "2026.02.04"
 COMPANY_SITE = "nuevauno.com"
 COMPANY_EMAIL = "hola@nuevauno.com"
 
-# ── evdev ──
+# --- evdev ---
 
 try:
     import evdev
@@ -212,7 +256,7 @@ except ImportError:
     HAS_EVDEV = False
     log.warning("evdev not available")
 
-# ── Colores ──
+# --- Colors ---
 
 class C:
     G = '\033[1;32m'
@@ -223,7 +267,7 @@ class C:
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
-# ── Gamepad ──
+# --- Gamepad ---
 
 def find_gamepad():
     if not HAS_EVDEV:
@@ -274,7 +318,6 @@ def read_gamepad(dev, axis_info, timeout=0.05):
                     elif event.value > 0:
                         last = 'down'
             elif event.type == ecodes.EV_KEY and event.value == 1:
-                log.debug("Button %d", event.code)
                 if event.code in {304, 315, 288, 289, 297}:
                     last = 'select'
         return last
@@ -282,7 +325,7 @@ def read_gamepad(dev, axis_info, timeout=0.05):
         log.error("Gamepad error: %s", e)
     return None
 
-# ── Teclado ──
+# --- Keyboard ---
 
 def setup_keyboard():
     import termios, tty
@@ -316,7 +359,7 @@ def read_keyboard(timeout=0.05):
         pass
     return None
 
-# ── Menú ──
+# --- Menu ---
 
 def get_windows_entry():
     try:
@@ -383,11 +426,9 @@ def draw_menu(selected, remaining, gp_name):
         sys.stdout.write("\n" * pad_top)
     print("\n".join(lines))
 
-# ── Main ──
+# --- Main ---
 
 def main():
-    log.info("Test mode: %s", TEST_MODE)
-
     gp_dev = None
     axis_info = {}
     gp_name = None
@@ -447,8 +488,10 @@ def main():
         interrupted = True
     finally:
         if grabbed and gp_dev:
-            try: gp_dev.ungrab()
-            except Exception: pass
+            try:
+                gp_dev.ungrab()
+            except Exception:
+                pass
         if old_term:
             restore_keyboard(old_term)
 
@@ -487,14 +530,12 @@ chmod +x /opt/boot-selector/selector.py
 
 echo -e "  ${GREEN}✓${NC} Selector creado"
 
-# ── Paso 4: Inyectar en el display manager ────────────────────────
-
-echo -e "${GREEN}[4/5]${NC} Inyectando en ${BOLD}${DM_SERVICE}${NC}..."
+# Paso 4: inyectar en display manager
+step "4/5" "Inyectando en ${DM_SERVICE}..."
 
 DM_DROPIN_DIR="/etc/systemd/system/${DM_SERVICE}.d"
 mkdir -p "$DM_DROPIN_DIR"
 
-# ExecStartPre con - = si falla, el DM arranca igual (failsafe)
 cat > "${DM_DROPIN_DIR}/boot-selector.conf" << 'DROPEOF'
 [Service]
 ExecStartPre=-/opt/boot-selector/run.sh
@@ -503,67 +544,39 @@ DROPEOF
 systemctl daemon-reload
 
 if systemctl cat "${DM_SERVICE}" 2>/dev/null | grep -q "boot-selector"; then
-    echo -e "  ${GREEN}✓${NC} Verificado: ${DM_SERVICE} ejecutará el selector antes de arrancar"
+    echo -e "  ${GREEN}✓${NC} Verificado: ${DM_SERVICE} ejecutara el selector antes de arrancar"
 else
-    echo -e "  ${YELLOW}!${NC} No se pudo verificar el drop-in"
+    warn "No se pudo verificar el drop-in"
 fi
 
-# ── Paso 5: GRUB + scripts auxiliares ─────────────────────────────
-
-echo -e "${GREEN}[5/5]${NC} Configurando GRUB y scripts..."
-
-cp /etc/default/grub /etc/default/grub.bak-selector 2>/dev/null || true
-sed -i 's/GRUB_TIMEOUT=.*/GRUB_TIMEOUT=2/' /etc/default/grub
-update-grub 2>/dev/null || grub-mkconfig -o /boot/grub/grub.cfg 2>/dev/null || true
+# Paso 5: scripts utiles
+step "5/5" "Creando scripts utiles..."
 
 cat > /opt/boot-selector/test.sh << 'TESTEOF'
 #!/bin/bash
-echo "=== Boot Selector - Test ==="
-echo ""
+set -e
 sudo rm -f /run/boot-selector-done
 sudo python3 /opt/boot-selector/selector.py --test
-echo ""
-echo "=== Log ==="
-tail -20 /var/log/boot-selector.log 2>/dev/null || echo "(sin log)"
 TESTEOF
 chmod +x /opt/boot-selector/test.sh
 
 cat > /opt/boot-selector/uninstall.sh << 'UNINSTEOF'
 #!/bin/bash
-echo "Desinstalando Boot Selector..."
-DM_SERVICE=$(cat /opt/boot-selector/.dm-service 2>/dev/null)
+set -e
+DM_SERVICE=$(cat /opt/boot-selector/.dm-service 2>/dev/null || true)
 if [ -n "$DM_SERVICE" ]; then
     rm -f "/etc/systemd/system/${DM_SERVICE}.d/boot-selector.conf"
     rmdir "/etc/systemd/system/${DM_SERVICE}.d" 2>/dev/null || true
-    echo "  Drop-in de ${DM_SERVICE} eliminado"
 fi
-systemctl disable boot-selector.service 2>/dev/null || true
-rm -f /etc/systemd/system/boot-selector.service
-rm -rf /etc/systemd/system/display-manager.service.d/wait-boot-selector.conf
-rm -f /run/boot-selector-done
-cp /etc/default/grub.bak-selector /etc/default/grub 2>/dev/null
-update-grub 2>/dev/null || true
 systemctl daemon-reload
 rm -rf /opt/boot-selector
-echo "Desinstalado"
+rm -f /run/boot-selector-done
+
+echo "Boot Selector desinstalado"
 UNINSTEOF
 chmod +x /opt/boot-selector/uninstall.sh
 
-# ── Resultado ─────────────────────────────────────────────────────
-
 echo ""
-echo -e "${GREEN}${BOLD}╔════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}${BOLD}║        INSTALACION COMPLETA            ║${NC}"
-echo -e "${GREEN}${BOLD}╚════════════════════════════════════════╝${NC}"
-echo ""
-echo -e "  ${BOLD}Cómo funciona:${NC}"
-echo "    Desactiva Plymouth, muestra menu en tty1, ANTES de ${DM_SERVICE}"
-echo ""
-echo -e "  ${CYAN}PROBAR:${NC}  sudo /opt/boot-selector/test.sh"
-echo -e "  ${CYAN}LOG:${NC}     cat /var/log/boot-selector.log"
-echo -e "  ${YELLOW}REBOOT:${NC}  sudo reboot"
-echo -e "  ${RED}REMOVE:${NC}  sudo /opt/boot-selector/uninstall.sh"
-echo ""
-echo -e "  ${YELLOW}IMPORTANTE: después de reiniciar, revisa el log:${NC}"
-echo "    cat /var/log/boot-selector.log"
-echo ""
+echo -e "${GREEN}Listo.${NC}"
+echo "Probar: sudo /opt/boot-selector/test.sh"
+echo "Log:   cat /var/log/boot-selector.log"
