@@ -269,6 +269,8 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 # --- Gamepad ---
 
+PREFERRED_DEVICE_FILE = "/opt/boot-selector/gamepad-path"
+
 def _uevent_props(devpath):
     # devpath: /dev/input/eventX -> /sys/class/input/eventX/device/uevent
     try:
@@ -358,21 +360,49 @@ def _iter_key_names(code):
 def find_gamepad():
     if not HAS_EVDEV:
         return None
+    # 1) Prefer explicit override if present
+    try:
+        if os.path.exists(PREFERRED_DEVICE_FILE):
+            with open(PREFERRED_DEVICE_FILE, "r") as f:
+                pref = f.read().strip()
+            if pref:
+                pref = os.path.realpath(pref)
+                if os.path.exists(pref):
+                    dev = evdev.InputDevice(pref)
+                    caps = dev.capabilities(verbose=False)
+                    axis_info = {}
+                    if ecodes.EV_ABS in caps:
+                        for code, info in caps[ecodes.EV_ABS]:
+                            if code in ABS_GAMEPAD_AXES:
+                                axis_info[code] = {'min': info.min, 'max': info.max}
+                    log.info("Using preferred gamepad: %s (%s)", dev.name, dev.path)
+                    return dev, axis_info
+    except Exception as e:
+        log.warning("Preferred device failed: %s", e)
+
     best = None
-    best_score = -1
+    best_score = None
     for path in evdev.list_devices():
         try:
             dev = evdev.InputDevice(path)
             caps = dev.capabilities(verbose=False)
             score = 0
             props = _uevent_props(path)
-            if props.get("ID_INPUT_GAMEPAD") == "1" or props.get("ID_INPUT_JOYSTICK") == "1":
-                score += 10
+            is_gamepad = props.get("ID_INPUT_GAMEPAD") == "1"
+            is_joystick = props.get("ID_INPUT_JOYSTICK") == "1"
+            is_keyboard = props.get("ID_INPUT_KEYBOARD") == "1"
+            is_mouse = props.get("ID_INPUT_MOUSE") == "1"
+            if is_gamepad:
+                score += 20
+            if is_joystick:
+                score += 15
             if props.get("ID_BUS") in ("usb", "bluetooth"):
                 score += 1
             name = (dev.name or "").lower()
             if any(h in name for h in GAMEPAD_NAME_HINTS):
                 score += 5
+            if is_keyboard or is_mouse:
+                score -= 5
 
             abs_codes = []
             if ecodes.EV_ABS in caps:
@@ -381,13 +411,13 @@ def find_gamepad():
                     score += 3
 
             key_codes = []
+            key_names = []
             if ecodes.EV_KEY in caps:
                 key_codes = [c for c in caps[ecodes.EV_KEY]]
                 if any(c in GAMEPAD_BUTTONS for c in key_codes):
                     score += 5
                 if DPAD_UP in key_codes or DPAD_DOWN in key_codes:
                     score += 2
-                key_names = []
                 for c in key_codes:
                     key_names.extend(_iter_key_names(c))
                 if any(n.startswith("BTN_") and n not in BTN_EXCLUDE for n in key_names):
@@ -399,16 +429,29 @@ def find_gamepad():
                     if code in ABS_GAMEPAD_AXES:
                         axis_info[code] = {'min': info.min, 'max': info.max}
 
+            # Skip obvious keyboard/mouse unless it is explicitly marked as gamepad/joystick
+            if (is_keyboard or is_mouse) and not (is_gamepad or is_joystick):
+                log.info("Skip (keyboard/mouse): %s (%s) props=%s", dev.name, dev.path, props)
+                continue
+
+            # Avoid mouse-only devices
+            if ecodes.EV_REL in caps and not (is_gamepad or is_joystick):
+                score -= 5
+
             if score > 0:
                 log.info("Candidate: %s (%s) score=%d abs=%s props=%s", dev.name, dev.path, score, abs_codes, props)
-                if score > best_score:
+                # Tie-breakers
+                abs_count = len([c for c in abs_codes if c in ABS_GAMEPAD_AXES])
+                btn_count = len([n for n in key_names if n.startswith("BTN_") and n not in BTN_EXCLUDE])
+                tie = (score, int(is_gamepad), int(is_joystick), abs_count, btn_count)
+                if best is None or best_score is None or tie > best_score:
                     best = (dev, axis_info)
-                    best_score = score
+                    best_score = tie
         except (PermissionError, OSError) as e:
             log.debug("Skip %s: %s", path, e)
     if best:
         dev, axis_info = best
-        log.info("Gamepad selected: %s (%s) score=%d axes=%s", dev.name, dev.path, best_score, axis_info)
+        log.info("Gamepad selected: %s (%s) score=%s axes=%s", dev.name, dev.path, best_score, axis_info)
         return dev, axis_info
     log.warning("No gamepad found")
     return None
