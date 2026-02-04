@@ -1,11 +1,12 @@
 #!/bin/bash
 #
-# GRUB Gamepad Boot Selector v1.0
+# Gamepad Boot Selector v5.0
 #
-# Este script instala un selector de boot que funciona con gamepad USB.
-# Carga Ubuntu en modo mínimo, muestra un menú, y permite elegir el SO.
+# Selector de SO que corre DESPUÉS de GRUB, dentro de Linux.
+# Se inyecta como ExecStartPre del display manager, así es
+# IMPOSIBLE que el escritorio arranque sin pasar por el selector.
 #
-# Funciona porque Linux SÍ tiene drivers para gamepads USB.
+# Usa Python + evdev para leer gamepad USB de verdad.
 #
 
 set -e
@@ -18,370 +19,516 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 echo ""
-echo -e "${CYAN}${BOLD}========================================${NC}"
-echo -e "${CYAN}${BOLD}   Gamepad Boot Selector Installer${NC}"
-echo -e "${CYAN}${BOLD}========================================${NC}"
+echo -e "${CYAN}${BOLD}╔════════════════════════════════════════╗${NC}"
+echo -e "${CYAN}${BOLD}║   Gamepad Boot Selector v5.0           ║${NC}"
+echo -e "${CYAN}${BOLD}╚════════════════════════════════════════╝${NC}"
 echo ""
 
-# Check root
 if [ "$EUID" -ne 0 ]; then
     echo -e "${RED}Error: Ejecutar como root (sudo)${NC}"
     exit 1
 fi
 
-# Check we're on Ubuntu/Debian
 if [ ! -f /etc/os-release ]; then
     echo -e "${RED}Error: Sistema no soportado${NC}"
     exit 1
 fi
 
+# ── Limpiar versiones anteriores ──────────────────────────────────
+
+systemctl disable boot-selector.service 2>/dev/null || true
+rm -f /etc/systemd/system/boot-selector.service
+rm -rf /etc/systemd/system/display-manager.service.d/wait-boot-selector.conf
+rm -f /run/boot-selector-done
+
+# ── Paso 1: Dependencias ──────────────────────────────────────────
+
 echo -e "${GREEN}[1/5]${NC} Instalando dependencias..."
 apt-get update -qq
-apt-get install -y -qq python3 python3-evdev dialog kexec-tools
+apt-get install -y -qq python3 python3-evdev joystick 2>/dev/null
 
-echo -e "${GREEN}[2/5]${NC} Creando selector de boot..."
+if ! python3 -c "import evdev" 2>/dev/null; then
+    echo -e "${YELLOW}python3-evdev no disponible via apt, intentando pip...${NC}"
+    apt-get install -y -qq python3-pip 2>/dev/null || true
+    pip3 install evdev 2>/dev/null || pip install evdev 2>/dev/null || true
+fi
 
-# Create the boot selector directory
+if ! python3 -c "import evdev" 2>/dev/null; then
+    echo -e "${RED}Error: No se pudo instalar python3-evdev${NC}"
+    echo "  Intenta manualmente: sudo apt install python3-evdev"
+    exit 1
+fi
+
+echo -e "  ${GREEN}✓${NC} python3-evdev instalado"
+
+# ── Paso 2: Detectar display manager ─────────────────────────────
+
+echo -e "${GREEN}[2/5]${NC} Detectando display manager..."
+
+DM_SERVICE=""
+
+# Método 1: Leer el symlink de display-manager.service
+if [ -L /etc/systemd/system/display-manager.service ]; then
+    DM_SERVICE=$(basename "$(readlink -f /etc/systemd/system/display-manager.service)")
+fi
+
+# Método 2: Buscar en los servicios habilitados
+if [ -z "$DM_SERVICE" ]; then
+    for dm in gdm3 gdm lightdm sddm lxdm; do
+        if systemctl is-enabled "${dm}.service" 2>/dev/null | grep -q "enabled"; then
+            DM_SERVICE="${dm}.service"
+            break
+        fi
+    done
+fi
+
+if [ -z "$DM_SERVICE" ]; then
+    echo -e "${RED}Error: No se detectó display manager (gdm3, lightdm, sddm)${NC}"
+    echo "  Verifica con: systemctl status display-manager.service"
+    exit 1
+fi
+
+echo -e "  ${GREEN}✓${NC} Display manager: ${BOLD}${DM_SERVICE}${NC}"
+
+# ── Paso 3: Crear scripts ────────────────────────────────────────
+
+echo -e "${GREEN}[3/5]${NC} Creando selector..."
+
 mkdir -p /opt/boot-selector
 
-# Create the gamepad menu script
-cat > /opt/boot-selector/selector.py << 'SELECTOR'
+# Guardar qué DM usamos para el uninstaller
+echo "$DM_SERVICE" > /opt/boot-selector/.dm-service
+
+# ── Script wrapper (bash) - maneja TTY y flag ──
+cat > /opt/boot-selector/run.sh << 'RUNEOF'
+#!/bin/bash
+#
+# Wrapper que corre ANTES del display manager.
+# Maneja el cambio de TTY y el flag de "ya corrí".
+#
+
+LOGFILE="/var/log/boot-selector.log"
+FLAG="/run/boot-selector-done"
+
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') RUN: $*" >> "$LOGFILE"; }
+
+log "=== run.sh started (PID=$$) ==="
+
+# Si ya corrió este boot, salir inmediatamente
+if [ -f "$FLAG" ]; then
+    log "Flag exists, skipping"
+    exit 0
+fi
+
+# Esperar que USB se estabilice
+log "Waiting 2s for USB..."
+sleep 2
+
+# Cambiar a tty1 para que el usuario vea el menú
+log "Switching to tty1"
+chvt 1 2>/dev/null || true
+sleep 0.5
+
+# Ejecutar el selector Python con tty1 como entrada/salida
+log "Starting selector.py"
+/usr/bin/python3 /opt/boot-selector/selector.py < /dev/tty1 > /dev/tty1 2>> "$LOGFILE"
+RESULT=$?
+log "selector.py exited with code $RESULT"
+
+# Crear flag para no correr de nuevo este boot
+touch "$FLAG"
+log "Flag created"
+
+# Volver a tty donde estará el display manager
+# GDM usa tty1 o tty2, LightDM usa tty7
+for vt in 1 2 7; do
+    chvt "$vt" 2>/dev/null && log "Switched to tty$vt" && break
+done
+
+log "=== run.sh finished ==="
+exit 0
+RUNEOF
+chmod +x /opt/boot-selector/run.sh
+
+# ── Script selector Python ──
+cat > /opt/boot-selector/selector.py << 'PYEOF'
 #!/usr/bin/env python3
 """
-Boot Selector con soporte de Gamepad USB
-Lee input del gamepad y permite elegir entre Ubuntu y Windows
+Boot Selector v5.0 - Con soporte REAL de gamepad USB.
+Usa evdev para leer eventos del gamepad directamente.
 """
 
 import os
 import sys
 import time
+import select
+import logging
 import subprocess
-import glob
 
-# Intentar importar evdev (para gamepad)
+# ── Logging ──
+
+logging.basicConfig(
+    filename="/var/log/boot-selector.log",
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)s: %(message)s",
+)
+log = logging.getLogger("boot-selector")
+log.info("Boot Selector v5.0 - Python started (PID=%d)", os.getpid())
+
+# ── Config ──
+
+TIMEOUT = 15
+DEFAULT_SEL = 0
+TEST_MODE = "--test" in sys.argv
+
+# ── evdev ──
+
 try:
     import evdev
     from evdev import ecodes
     HAS_EVDEV = True
+    log.info("evdev OK")
 except ImportError:
     HAS_EVDEV = False
+    log.warning("evdev not available")
 
-# Colores ANSI
-class Colors:
-    RED = '\033[91m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    BLUE = '\033[94m'
-    CYAN = '\033[96m'
-    WHITE = '\033[97m'
-    BOLD = '\033[1m'
-    END = '\033[0m'
+# ── Colores ──
 
-# Configuración
-TIMEOUT = 10  # Segundos para auto-boot
-DEFAULT_OS = "ubuntu"  # ubuntu o windows
-WINDOWS_ENTRY = "Windows Boot Manager"  # Nombre en GRUB
+class C:
+    G = '\033[1;32m'
+    Y = '\033[1;33m'
+    CN = '\033[1;36m'
+    W = '\033[1;37m'
+    N = '\033[0m'
 
-def clear_screen():
-    os.system('clear')
+# ── Gamepad ──
 
 def find_gamepad():
-    """Busca un gamepad conectado"""
     if not HAS_EVDEV:
         return None
-
-    devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
-    for device in devices:
-        caps = device.capabilities()
-        # Buscar dispositivos con ejes absolutos (joysticks/gamepads)
-        if ecodes.EV_ABS in caps:
-            abs_caps = caps[ecodes.EV_ABS]
-            # Verificar que tenga al menos X e Y axis
-            abs_codes = [code for code, _ in abs_caps] if abs_caps else []
-            if ecodes.ABS_X in abs_codes or ecodes.ABS_HAT0X in abs_codes:
-                return device
+    for path in evdev.list_devices():
+        try:
+            dev = evdev.InputDevice(path)
+            caps = dev.capabilities(verbose=False)
+            if ecodes.EV_ABS not in caps:
+                continue
+            abs_codes = [c for c, _ in caps[ecodes.EV_ABS]]
+            has_xy = ecodes.ABS_X in abs_codes and ecodes.ABS_Y in abs_codes
+            has_hat = ecodes.ABS_HAT0X in abs_codes and ecodes.ABS_HAT0Y in abs_codes
+            if has_xy or has_hat:
+                axis_info = {}
+                for code, info in caps[ecodes.EV_ABS]:
+                    if code in (ecodes.ABS_X, ecodes.ABS_Y,
+                                ecodes.ABS_HAT0X, ecodes.ABS_HAT0Y):
+                        axis_info[code] = {'min': info.min, 'max': info.max}
+                log.info("Gamepad: %s (%s) axes=%s", dev.name, dev.path, axis_info)
+                return dev, axis_info
+        except (PermissionError, OSError) as e:
+            log.debug("Skip %s: %s", path, e)
+    log.warning("No gamepad found")
     return None
 
-def get_grub_entries():
-    """Obtiene las entradas de GRUB"""
-    entries = []
-    try:
-        result = subprocess.run(['grep', '-E', '^menuentry|^submenu', '/boot/grub/grub.cfg'],
-                                capture_output=True, text=True)
-        for line in result.stdout.split('\n'):
-            if 'menuentry' in line:
-                # Extraer nombre entre comillas
-                start = line.find("'")
-                if start == -1:
-                    start = line.find('"')
-                if start != -1:
-                    end = line.find("'", start + 1)
-                    if end == -1:
-                        end = line.find('"', start + 1)
-                    if end != -1:
-                        name = line[start+1:end]
-                        entries.append(name)
-    except:
-        pass
-    return entries
 
-def find_windows_entry():
-    """Busca la entrada de Windows en GRUB"""
-    entries = get_grub_entries()
-    for entry in entries:
-        if 'windows' in entry.lower():
-            return entry
-    return None
-
-def boot_windows():
-    """Configura GRUB para bootear Windows y reinicia"""
-    windows_entry = find_windows_entry()
-    if windows_entry:
-        print(f"\n{Colors.CYAN}Reiniciando a Windows...{Colors.END}")
-        subprocess.run(['grub-reboot', windows_entry], check=False)
-        time.sleep(1)
-        subprocess.run(['systemctl', 'reboot'], check=False)
-    else:
-        print(f"\n{Colors.RED}No se encontró Windows en GRUB{Colors.END}")
-        time.sleep(3)
-        boot_ubuntu()
-
-def boot_ubuntu():
-    """Continúa el boot normal de Ubuntu"""
-    print(f"\n{Colors.GREEN}Iniciando Ubuntu...{Colors.END}")
-    time.sleep(1)
-    # Salir con código 0 para continuar boot normal
-    sys.exit(0)
-
-def draw_menu(selected, timeout_remaining, gamepad_status):
-    """Dibuja el menú de selección"""
-    clear_screen()
-
-    print(f"""
-{Colors.CYAN}{Colors.BOLD}╔══════════════════════════════════════════════════════════╗
-║             SELECTOR DE SISTEMA OPERATIVO                 ║
-╚══════════════════════════════════════════════════════════╝{Colors.END}
-""")
-
-    options = ["Ubuntu Linux", "Windows"]
-
-    for i, opt in enumerate(options):
-        if i == selected:
-            print(f"  {Colors.GREEN}{Colors.BOLD}  ► {opt} ◄  {Colors.END}")
-        else:
-            print(f"      {opt}")
-
-    print(f"""
-{Colors.YELLOW}─────────────────────────────────────────────────────────────{Colors.END}
-
-  Controles:
-    {Colors.CYAN}D-Pad / Flechas{Colors.END}  →  Navegar
-    {Colors.CYAN}A / Start / Enter{Colors.END}  →  Seleccionar
-
-  {Colors.YELLOW}Auto-boot en: {timeout_remaining}s{Colors.END}
-
-  Gamepad: {gamepad_status}
-""")
-
-def read_gamepad_input(gamepad, timeout=0.1):
-    """Lee input del gamepad de forma no bloqueante"""
-    if not gamepad:
+def read_gamepad(dev, axis_info, timeout=0.05):
+    if not dev:
         return None
-
     try:
-        # Leer eventos con timeout
-        import select
-        r, _, _ = select.select([gamepad.fd], [], [], timeout)
-        if r:
-            for event in gamepad.read():
-                if event.type == ecodes.EV_ABS:
-                    # D-pad como ejes
-                    if event.code == ecodes.ABS_Y or event.code == ecodes.ABS_HAT0Y:
-                        if event.value < 100:  # Arriba
-                            return 'up'
-                        elif event.value > 150:  # Abajo
-                            return 'down'
-                    elif event.code == ecodes.ABS_X or event.code == ecodes.ABS_HAT0X:
-                        if event.value < 100:  # Izquierda
-                            return 'left'
-                        elif event.value > 150:  # Derecha
-                            return 'right'
-                elif event.type == ecodes.EV_KEY:
-                    # Botones
-                    if event.value == 1:  # Presionado
-                        # Botones comunes: BTN_A, BTN_B, BTN_START, etc.
-                        if event.code in [ecodes.BTN_A, ecodes.BTN_SOUTH,
-                                         ecodes.BTN_START, ecodes.BTN_SELECT,
-                                         304, 305, 307, 308]:  # Códigos comunes SNES
-                            return 'select'
-    except Exception as e:
-        pass
+        r, _, _ = select.select([dev.fd], [], [], timeout)
+        if not r:
+            return None
+        last_action = None
+        for event in dev.read():
+            if event.type == ecodes.EV_ABS:
+                if event.code == ecodes.ABS_Y:
+                    info = axis_info.get(ecodes.ABS_Y, {'min': 0, 'max': 255})
+                    center = (info['min'] + info['max']) // 2
+                    thresh = (info['max'] - info['min']) // 4
+                    if event.value < center - thresh:
+                        last_action = 'up'
+                    elif event.value > center + thresh:
+                        last_action = 'down'
+                elif event.code == ecodes.ABS_HAT0Y:
+                    if event.value < 0:
+                        last_action = 'up'
+                    elif event.value > 0:
+                        last_action = 'down'
+            elif event.type == ecodes.EV_KEY and event.value == 1:
+                btn = event.code
+                log.debug("Button %d pressed", btn)
+                if btn in {304, 315, 288, 289, 297}:
+                    last_action = 'select'
+        return last_action
+    except (OSError, IOError) as e:
+        log.error("Gamepad read error: %s", e)
     return None
 
-def read_keyboard_input(timeout=0.1):
-    """Lee input del teclado de forma no bloqueante"""
-    import select
+# ── Teclado ──
+
+def setup_keyboard():
+    import termios, tty
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    tty.setcbreak(fd)
+    return old
+
+def restore_keyboard(old):
     import termios
-    import tty
-
-    old_settings = termios.tcgetattr(sys.stdin)
     try:
-        tty.setraw(sys.stdin.fileno())
-        rlist, _, _ = select.select([sys.stdin], [], [], timeout)
-        if rlist:
-            key = sys.stdin.read(1)
-            if key == '\x1b':  # Escape sequence
-                extra = sys.stdin.read(2)
-                if extra == '[A':
-                    return 'up'
-                elif extra == '[B':
-                    return 'down'
-            elif key == '\r' or key == '\n':
-                return 'select'
-    except:
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old)
+    except Exception:
         pass
-    finally:
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+
+def read_keyboard(timeout=0.05):
+    try:
+        r, _, _ = select.select([sys.stdin], [], [], timeout)
+        if not r:
+            return None
+        key = sys.stdin.read(1)
+        if key == '\x1b':
+            r2, _, _ = select.select([sys.stdin], [], [], 0.05)
+            if r2:
+                seq = sys.stdin.read(2)
+                if seq == '[A': return 'up'
+                if seq == '[B': return 'down'
+        elif key in ('\r', '\n'):
+            return 'select'
+    except Exception:
+        pass
     return None
+
+# ── Menú ──
+
+def get_windows_entry():
+    try:
+        with open("/boot/grub/grub.cfg") as f:
+            for line in f:
+                if "menuentry" in line and "indows" in line:
+                    s = line.find("'")
+                    if s != -1:
+                        e = line.find("'", s + 1)
+                        if e != -1:
+                            return line[s+1:e]
+    except FileNotFoundError:
+        pass
+    return None
+
+def draw_menu(selected, remaining, gp_name):
+    sys.stdout.write('\033[2J\033[H')
+    sys.stdout.flush()
+    opt_u = f"       {C.G}>> Ubuntu Linux <<{C.N}" if selected == 0 else "         Ubuntu Linux"
+    opt_w = f"       {C.G}>> Windows <<{C.N}" if selected == 1 else "         Windows"
+    gp = f"  Gamepad: {C.G}>> {gp_name}{C.N}" if gp_name else f"  Gamepad: {C.Y}No detectado (teclado){C.N}"
+    print(f"""
+{C.CN}========================================={C.N}
+{C.CN}    SELECCIONAR SISTEMA OPERATIVO        {C.N}
+{C.CN}========================================={C.N}
+
+{opt_u}
+{opt_w}
+
+{C.Y}-----------------------------------------{C.N}
+
+  {C.W}D-Pad / Flechas{C.N}  =  Navegar
+  {C.W}A / Start / Enter{C.N}  =  Seleccionar
+
+  {C.Y}Auto-boot en: {remaining} segundos{C.N}
+
+{gp}
+""")
+
+# ── Main ──
 
 def main():
-    selected = 0  # 0 = Ubuntu, 1 = Windows
-    timeout_remaining = TIMEOUT
-    last_time = time.time()
+    log.info("Test mode: %s", TEST_MODE)
 
-    # Buscar gamepad
-    gamepad = find_gamepad()
-    if gamepad:
-        gamepad_status = f"{Colors.GREEN}✓ Detectado: {gamepad.name}{Colors.END}"
+    gamepad_dev = None
+    axis_info = {}
+    gp_name = None
+    grabbed = False
+
+    result = find_gamepad()
+    if result:
+        gamepad_dev, axis_info = result
+        gp_name = gamepad_dev.name
         try:
-            gamepad.grab()  # Capturar exclusivamente
-        except:
+            gamepad_dev.grab()
+            grabbed = True
+        except (OSError, IOError):
             pass
-    else:
-        gamepad_status = f"{Colors.YELLOW}No detectado (usando teclado){Colors.END}"
+
+    old_term = None
+    try:
+        old_term = setup_keyboard()
+    except Exception as e:
+        log.warning("Keyboard setup failed: %s", e)
+
+    selected = DEFAULT_SEL
+    interrupted = False
+    remaining = TIMEOUT
+    last_time = time.time()
+    prev_state = (-1, -1)
 
     try:
-        while timeout_remaining > 0:
-            draw_menu(selected, int(timeout_remaining), gamepad_status)
+        while remaining > 0:
+            cur = (selected, int(remaining))
+            if cur != prev_state:
+                draw_menu(selected, int(remaining), gp_name)
+                prev_state = cur
 
-            # Leer input de gamepad
-            action = None
-            if gamepad:
-                action = read_gamepad_input(gamepad, 0.05)
-
-            # Leer input de teclado también
+            action = read_gamepad(gamepad_dev, axis_info, 0.05)
             if not action:
-                action = read_keyboard_input(0.05)
+                action = read_keyboard(0.05)
 
-            if action == 'up' or action == 'left':
-                selected = (selected - 1) % 2
-                timeout_remaining = TIMEOUT  # Reset timeout on input
-            elif action == 'down' or action == 'right':
-                selected = (selected + 1) % 2
-                timeout_remaining = TIMEOUT
+            if action == 'up':
+                selected = 0
+                remaining = TIMEOUT
+            elif action == 'down':
+                selected = 1
+                remaining = TIMEOUT
             elif action == 'select':
+                log.info("Confirmed: %s", "Ubuntu" if selected == 0 else "Windows")
                 break
 
-            # Actualizar countdown
-            current_time = time.time()
-            timeout_remaining -= (current_time - last_time)
-            last_time = current_time
+            now = time.time()
+            remaining -= (now - last_time)
+            last_time = now
 
+        if remaining <= 0:
+            log.info("Timeout -> %s", "Ubuntu" if selected == 0 else "Windows")
+
+    except KeyboardInterrupt:
+        interrupted = True
     finally:
-        if gamepad:
-            try:
-                gamepad.ungrab()
-            except:
-                pass
+        if grabbed and gamepad_dev:
+            try: gamepad_dev.ungrab()
+            except Exception: pass
+        if old_term:
+            restore_keyboard(old_term)
 
-    # Ejecutar selección
-    clear_screen()
-    if selected == 0:
-        boot_ubuntu()
+    if interrupted:
+        return
+
+    sys.stdout.write('\033[2J\033[H')
+    sys.stdout.flush()
+
+    if selected == 1:
+        win = get_windows_entry()
+        if win:
+            print(f"{C.CN}Reiniciando a Windows...{C.N}")
+            log.info("grub-reboot '%s'", win)
+            subprocess.run(["grub-reboot", win], check=False)
+            time.sleep(1)
+            if not TEST_MODE:
+                subprocess.run(["reboot"], check=False)
+        else:
+            print(f"{C.Y}Windows no encontrado, iniciando Ubuntu...{C.N}")
+            time.sleep(2)
     else:
-        boot_windows()
+        print(f"{C.G}Iniciando Ubuntu...{C.N}")
+        log.info("Booting Ubuntu (normal)")
+
+    time.sleep(1)
 
 if __name__ == "__main__":
-    # Si se pasa --skip, continuar boot normal
-    if len(sys.argv) > 1 and sys.argv[1] == '--skip':
-        sys.exit(0)
-
-    main()
-SELECTOR
-
+    try:
+        main()
+    except Exception as e:
+        log.exception("Fatal: %s", e)
+        sys.exit(1)
+PYEOF
 chmod +x /opt/boot-selector/selector.py
 
-echo -e "${GREEN}[3/5]${NC} Creando servicio systemd..."
+echo -e "  ${GREEN}✓${NC} Selector creado"
 
-# Create systemd service that runs early in boot
-cat > /etc/systemd/system/boot-selector.service << 'SERVICE'
-[Unit]
-Description=Gamepad Boot Selector
-DefaultDependencies=no
-After=systemd-udevd.service
-Before=basic.target
-Wants=systemd-udevd.service
+# ── Paso 4: Inyectar en el display manager ────────────────────────
 
+echo -e "${GREEN}[4/5]${NC} Inyectando en ${BOLD}${DM_SERVICE}${NC}..."
+
+# Crear drop-in que ejecuta nuestro script ANTES del display manager
+# ExecStartPre con - significa: si falla, el DM arranca igual (failsafe)
+DM_DROPIN_DIR="/etc/systemd/system/${DM_SERVICE}.d"
+mkdir -p "$DM_DROPIN_DIR"
+
+cat > "${DM_DROPIN_DIR}/boot-selector.conf" << 'DROPEOF'
 [Service]
-Type=oneshot
-ExecStart=/opt/boot-selector/selector.py
-StandardInput=tty
-StandardOutput=tty
-TTYPath=/dev/tty1
-TTYReset=yes
-TTYVHangup=yes
+ExecStartPre=-/opt/boot-selector/run.sh
+DROPEOF
 
-[Install]
-WantedBy=sysinit.target
-SERVICE
+echo -e "  ${GREEN}✓${NC} Drop-in creado en ${DM_DROPIN_DIR}/"
 
-echo -e "${GREEN}[4/5]${NC} Configurando GRUB..."
+# Recargar systemd
+systemctl daemon-reload
 
-# Backup GRUB config
-cp /etc/default/grub /etc/default/grub.backup-selector 2>/dev/null || true
+# Verificar que el drop-in se cargó
+if systemctl cat "${DM_SERVICE}" 2>/dev/null | grep -q "boot-selector"; then
+    echo -e "  ${GREEN}✓${NC} Verificado: el display manager ejecutará el selector"
+else
+    echo -e "  ${YELLOW}!${NC} No se pudo verificar (puede funcionar igual)"
+fi
 
-# Reducir timeout de GRUB a 0 (el selector es el nuevo menú)
+# ── Paso 5: GRUB + scripts auxiliares ─────────────────────────────
+
+echo -e "${GREEN}[5/5]${NC} Configurando GRUB y scripts..."
+
+cp /etc/default/grub /etc/default/grub.bak-selector 2>/dev/null || true
 sed -i 's/GRUB_TIMEOUT=.*/GRUB_TIMEOUT=2/' /etc/default/grub
-
-# Actualizar GRUB
 update-grub 2>/dev/null || grub-mkconfig -o /boot/grub/grub.cfg 2>/dev/null || true
 
-echo -e "${GREEN}[5/5]${NC} Habilitando servicio..."
-
-systemctl daemon-reload
-systemctl enable boot-selector.service
-
-# Create uninstall script
-cat > /opt/boot-selector/uninstall.sh << 'UNINSTALL'
+# Test script
+cat > /opt/boot-selector/test.sh << 'TESTEOF'
 #!/bin/bash
-systemctl disable boot-selector.service
+echo "=== Boot Selector v5.0 - Test ==="
+echo ""
+sudo rm -f /run/boot-selector-done
+sudo python3 /opt/boot-selector/selector.py --test
+echo ""
+echo "=== Log (últimas 20 líneas) ==="
+tail -20 /var/log/boot-selector.log 2>/dev/null || echo "(sin log)"
+TESTEOF
+chmod +x /opt/boot-selector/test.sh
+
+# Uninstall script - lee qué DM se usó
+cat > /opt/boot-selector/uninstall.sh << 'UNINSTEOF'
+#!/bin/bash
+echo "Desinstalando Boot Selector..."
+DM_SERVICE=$(cat /opt/boot-selector/.dm-service 2>/dev/null)
+if [ -n "$DM_SERVICE" ]; then
+    rm -f "/etc/systemd/system/${DM_SERVICE}.d/boot-selector.conf"
+    rmdir "/etc/systemd/system/${DM_SERVICE}.d" 2>/dev/null || true
+    echo "  Drop-in de ${DM_SERVICE} eliminado"
+fi
+systemctl disable boot-selector.service 2>/dev/null || true
 rm -f /etc/systemd/system/boot-selector.service
-rm -rf /opt/boot-selector
-cp /etc/default/grub.backup-selector /etc/default/grub 2>/dev/null || true
+rm -rf /etc/systemd/system/display-manager.service.d/wait-boot-selector.conf
+rm -f /run/boot-selector-done
+cp /etc/default/grub.bak-selector /etc/default/grub 2>/dev/null
 update-grub 2>/dev/null || true
-echo "Boot selector desinstalado"
-UNINSTALL
+systemctl daemon-reload
+rm -rf /opt/boot-selector
+echo "Desinstalado correctamente"
+UNINSTEOF
 chmod +x /opt/boot-selector/uninstall.sh
 
+# ── Resultado ─────────────────────────────────────────────────────
+
 echo ""
-echo -e "${GREEN}${BOLD}════════════════════════════════════════${NC}"
-echo -e "${GREEN}${BOLD}        ¡Instalación Completa!          ${NC}"
-echo -e "${GREEN}${BOLD}════════════════════════════════════════${NC}"
+echo -e "${GREEN}${BOLD}╔════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}${BOLD}║      INSTALACION COMPLETA (v5.0)       ║${NC}"
+echo -e "${GREEN}${BOLD}╚════════════════════════════════════════╝${NC}"
 echo ""
-echo "  El selector de boot está instalado."
+echo -e "  ${BOLD}Cómo funciona:${NC}"
+echo "    El selector se ejecuta ANTES de ${DM_SERVICE}"
+echo "    Es imposible que el escritorio arranque sin pasar por él"
 echo ""
-echo "  Al reiniciar verás un menú donde puedes"
-echo "  elegir Ubuntu o Windows con tu gamepad."
+echo -e "  ${CYAN}PROBAR AHORA:${NC}"
+echo "    sudo /opt/boot-selector/test.sh"
 echo ""
-echo "  Controles:"
-echo "    D-Pad Arriba/Abajo → Navegar"
-echo "    Botón A/Start      → Seleccionar"
+echo -e "  ${CYAN}VER LOG:${NC}"
+echo "    cat /var/log/boot-selector.log"
 echo ""
-echo "  Auto-boot: Ubuntu en 10 segundos"
+echo -e "  ${YELLOW}REINICIAR:${NC}"
+echo "    sudo reboot"
 echo ""
-echo -e "  ${YELLOW}Para probar: sudo /opt/boot-selector/selector.py${NC}"
-echo ""
-echo -e "  ${CYAN}Desinstalar: sudo /opt/boot-selector/uninstall.sh${NC}"
-echo ""
-echo -e "  ${GREEN}¡Reinicia para probar!${NC}"
+echo -e "  ${RED}DESINSTALAR:${NC}"
+echo "    sudo /opt/boot-selector/uninstall.sh"
 echo ""
