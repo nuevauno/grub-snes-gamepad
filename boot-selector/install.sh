@@ -344,11 +344,16 @@ BTN_EXCLUDE = {
     "BTN_TOOL_MOUSE", "BTN_STYLUS", "BTN_STYLUS2",
 }
 
-def _key_name(code):
+def _iter_key_names(code):
     try:
-        return ecodes.bytype[ecodes.EV_KEY].get(code, "")
+        name = ecodes.bytype[ecodes.EV_KEY].get(code, "")
     except Exception:
-        return ""
+        return []
+    if isinstance(name, (list, tuple)):
+        return [n for n in name if isinstance(n, str)]
+    if isinstance(name, str) and name:
+        return [name]
+    return []
 
 def find_gamepad():
     if not HAS_EVDEV:
@@ -382,7 +387,9 @@ def find_gamepad():
                     score += 5
                 if DPAD_UP in key_codes or DPAD_DOWN in key_codes:
                     score += 2
-                key_names = [_key_name(c) for c in key_codes]
+                key_names = []
+                for c in key_codes:
+                    key_names.extend(_iter_key_names(c))
                 if any(n.startswith("BTN_") and n not in BTN_EXCLUDE for n in key_names):
                     score += 3
 
