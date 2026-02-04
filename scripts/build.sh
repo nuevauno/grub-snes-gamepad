@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 GRUB_DIR="$PROJECT_DIR/grub"
 
-echo "=== Building GRUB SNES Gamepad Module ==="
+echo "=== Building GRUB Boot Selector Module ==="
 
 # Check if GRUB submodule exists
 if [ ! -d "$GRUB_DIR" ]; then

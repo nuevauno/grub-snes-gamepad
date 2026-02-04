@@ -25,7 +25,7 @@ clean:
 	rm -rf grub/
 
 help:
-	@echo "GRUB SNES Gamepad - Available targets:"
+	@echo "GRUB Boot Selector - Available targets:"
 	@echo ""
 	@echo "  make mapper   - Interactive controller mapping (recommended)"
 	@echo "  make build    - Build the GRUB module and test ISO"

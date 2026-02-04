@@ -51,7 +51,7 @@ fi
 
 echo -e "${GREEN}[1/5]${NC} Instalando dependencias..."
 apt-get update -qq
-apt-get install -y -qq python3 python3-evdev joystick 2>/dev/null
+apt-get install -y -qq python3 python3-evdev joystick kbd 2>/dev/null
 
 if ! python3 -c "import evdev" 2>/dev/null; then
     echo -e "${YELLOW}python3-evdev no disponible via apt, intentando pip...${NC}"
@@ -179,6 +179,8 @@ import time
 import select
 import logging
 import subprocess
+import re
+import shutil
 
 # ── Logging ──
 
@@ -195,6 +197,9 @@ log.info("selector.py started (PID=%d)", os.getpid())
 TIMEOUT = 15
 DEFAULT_SEL = 0
 TEST_MODE = "--test" in sys.argv
+APP_VERSION = "2026.02.04"
+COMPANY_SITE = "nuevauno.com"
+COMPANY_EMAIL = "hola@nuevauno.com"
 
 # ── evdev ──
 
@@ -215,6 +220,8 @@ class C:
     CN = '\033[1;36m'
     W = '\033[1;37m'
     N = '\033[0m'
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 # ── Gamepad ──
 
@@ -328,26 +335,53 @@ def get_windows_entry():
 def draw_menu(selected, remaining, gp_name):
     sys.stdout.write('\033[2J\033[H')
     sys.stdout.flush()
-    u = f"       {C.G}>> Ubuntu Linux <<{C.N}" if selected == 0 else "         Ubuntu Linux"
-    w = f"       {C.G}>> Windows <<{C.N}" if selected == 1 else "         Windows"
-    gp = f"  Gamepad: {C.G}>> {gp_name}{C.N}" if gp_name else f"  Gamepad: {C.Y}No detectado (teclado){C.N}"
-    print(f"""
-{C.CN}========================================={C.N}
-{C.CN}    SELECCIONAR SISTEMA OPERATIVO        {C.N}
-{C.CN}========================================={C.N}
+    width, height = shutil.get_terminal_size((80, 24))
+    bar_len = max(24, min(60, width - 6))
+    bar = "=" * bar_len
+    sep = "-" * bar_len
 
-{u}
-{w}
+    def strip_ansi(s):
+        return ANSI_RE.sub("", s)
 
-{C.Y}-----------------------------------------{C.N}
+    def center_line(s):
+        plain = strip_ansi(s)
+        if not plain:
+            return ""
+        if len(plain) >= width:
+            return s
+        pad = (width - len(plain)) // 2
+        return " " * pad + s
 
-  {C.W}D-Pad / Flechas{C.N}  =  Navegar
-  {C.W}A / Start / Enter{C.N}  =  Seleccionar
+    u = f"{C.G}>> UBUNTU LINUX <<{C.N}" if selected == 0 else "   UBUNTU LINUX   "
+    w = f"{C.G}>> WINDOWS <<{C.N}" if selected == 1 else "   WINDOWS   "
+    gp = f"Gamepad: {C.G}{gp_name}{C.N}" if gp_name else f"Gamepad: {C.Y}No detectado (teclado){C.N}"
 
-  {C.Y}Auto-boot en: {remaining} segundos{C.N}
+    lines = [
+        center_line(f"{C.CN}{bar}{C.N}"),
+        center_line(f"{C.CN}SELECTOR DE ARRANQUE{C.N}"),
+        center_line(f"{C.CN}ELIGE SISTEMA OPERATIVO{C.N}"),
+        center_line(f"{C.CN}{bar}{C.N}"),
+        "",
+        center_line(u),
+        center_line(w),
+        "",
+        center_line(f"{C.Y}{sep}{C.N}"),
+        "",
+        center_line(f"{C.W}D-Pad / Flechas = Navegar{C.N}"),
+        center_line(f"{C.W}A / Start / Enter = Seleccionar{C.N}"),
+        "",
+        center_line(f"{C.Y}Auto-boot en: {remaining} segundos{C.N}"),
+        "",
+        center_line(gp),
+        "",
+        center_line(f"{C.W}Version {APP_VERSION}{C.N}"),
+        center_line(f"{C.W}{COMPANY_SITE}  |  {COMPANY_EMAIL}{C.N}"),
+    ]
 
-{gp}
-""")
+    pad_top = max(0, (height - len(lines)) // 2)
+    if pad_top:
+        sys.stdout.write("\n" * pad_top)
+    print("\n".join(lines))
 
 # ── Main ──
 

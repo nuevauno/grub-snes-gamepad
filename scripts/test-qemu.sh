@@ -11,7 +11,7 @@ if [ ! -f "$ISO" ]; then
     exit 1
 fi
 
-echo "=== Testing GRUB SNES Gamepad in QEMU ==="
+echo "=== Testing GRUB Boot Selector in QEMU ==="
 echo ""
 echo "Connect your SNES controller before running this."
 echo ""

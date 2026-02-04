@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# GRUB SNES Gamepad Installer v5.0
-# https://github.com/nuevauno/grub-snes-gamepad
+# GRUB Boot Selector Installer v5.0
+# https://github.com/nuevauno/grub-boot-selector
 #
 # This version compiles a NEW module from scratch based on the working
 # usb_keyboard.c code, instead of patching tsoding's code.
@@ -22,7 +22,7 @@ NC='\033[0m'
 GRUB_DIR=""
 GRUB_MOD_DIR=""
 GRUB_PLATFORM=""
-BUILD_DIR="/tmp/grub-snes-build-$$"
+BUILD_DIR="/tmp/grub-boot-selector-build-$$"
 
 ok() { echo -e "  ${GREEN}[OK]${NC} $1"; }
 err() { echo -e "  ${RED}[ERROR]${NC} $1"; }
@@ -33,7 +33,7 @@ header() {
     clear
     echo ""
     echo -e "${CYAN}${BOLD}================================================${NC}"
-    echo -e "${CYAN}${BOLD}     GRUB SNES Gamepad Installer v${VERSION}${NC}"
+    echo -e "${CYAN}${BOLD}     GRUB Boot Selector Installer v${VERSION}${NC}"
     echo -e "${CYAN}${BOLD}================================================${NC}"
     echo ""
 }

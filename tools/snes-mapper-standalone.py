@@ -154,7 +154,7 @@ def map_controller(dev, ep):
 
 def save_config(ctrl, mapping):
     """Save configuration"""
-    config_dir = "/usr/local/share/grub-snes-gamepad"
+    config_dir = "/usr/local/share/grub-boot-selector"
     os.makedirs(config_dir, exist_ok=True)
 
     config = {

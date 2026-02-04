@@ -1,6 +1,6 @@
-# GRUB SNES Gamepad
+# GRUB Boot Selector
 
-Navigate GRUB bootloader menu using a USB SNES controller. Perfect for dual-boot systems with Bluetooth keyboards that don't work at boot time.
+Selector de arranque para GRUB controlado con gamepad y teclado, ideal para dual-boot.
 
 ## Problem
 
@@ -17,7 +17,7 @@ Use a cheap USB SNES controller to navigate GRUB menu:
 ## One-Line Install
 
 ```bash
-curl -sSL https://github.com/nuevauno/grub-snes-gamepad/releases/latest/download/install.sh | sudo bash
+curl -sSL https://github.com/nuevauno/grub-boot-selector/releases/latest/download/install.sh | sudo bash
 ```
 
 This always downloads the latest version automatically.
@@ -45,7 +45,7 @@ This project creates a GRUB module (`usb_snes_gamepad.mod`) that:
 ## Project Structure
 
 ```
-grub-snes-gamepad/
+grub-boot-selector/
 ├── src/
 │   └── usb_snes_gamepad.c    # GRUB module source
 ├── tools/
@@ -124,8 +124,8 @@ sudo update-grub
 ### Building from Source
 
 ```bash
-git clone --recursive https://github.com/YOUR_USERNAME/grub-snes-gamepad.git
-cd grub-snes-gamepad
+git clone --recursive https://github.com/YOUR_USERNAME/grub-boot-selector.git
+cd grub-boot-selector
 ./scripts/build.sh
 ```
 
